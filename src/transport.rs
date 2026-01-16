@@ -83,6 +83,7 @@ pub struct TransportConfig {
 pub struct AnnounceEvent {
     pub destination: Arc<Mutex<SingleOutputDestination>>,
     pub app_data: PacketDataBuffer,
+    pub ratchet_pub: Option<[u8; 32]>,
 }
 
 struct TransportHandler {
@@ -648,6 +649,7 @@ async fn handle_announce<'a>(
     if let Ok(result) = DestinationAnnounce::validate(packet) {
         let destination = result.0;
         let app_data = result.1;
+        let ratchet_pub = result.2;
         let dest_hash = destination.identity.address_hash;
         let destination = Arc::new(Mutex::new(destination));
 
@@ -697,6 +699,7 @@ async fn handle_announce<'a>(
         let _ = handler.announce_tx.send(AnnounceEvent {
             destination,
             app_data: PacketDataBuffer::new_from_slice(&app_data),
+            ratchet_pub,
         });
     }
 }

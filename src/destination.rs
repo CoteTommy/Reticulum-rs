@@ -60,6 +60,7 @@ pub const NAME_HASH_LENGTH: usize = 10;
 pub const RAND_HASH_LENGTH: usize = 10;
 pub const MIN_ANNOUNCE_DATA_LENGTH: usize =
     PUBLIC_KEY_LENGTH * 2 + NAME_HASH_LENGTH + RAND_HASH_LENGTH + SIGNATURE_LENGTH;
+pub const RATCHET_PUBLIC_KEY_LENGTH: usize = 32;
 
 #[derive(Copy, Clone)]
 pub struct DestinationName {
@@ -112,7 +113,10 @@ impl fmt::Display for DestinationDesc {
 pub type DestinationAnnounce = Packet;
 
 impl DestinationAnnounce {
-    pub fn validate(packet: &Packet) -> Result<(SingleOutputDestination, &[u8]), RnsError> {
+    pub fn validate(
+        packet: &Packet,
+    ) -> Result<(SingleOutputDestination, &[u8], Option<[u8; RATCHET_PUBLIC_KEY_LENGTH]>), RnsError>
+    {
         if packet.header.packet_type != PacketType::Announce {
             return Err(RnsError::PacketError);
         }
@@ -146,31 +150,65 @@ impl DestinationAnnounce {
         offset += NAME_HASH_LENGTH;
         let rand_hash = &announce_data[offset..(offset + RAND_HASH_LENGTH)];
         offset += RAND_HASH_LENGTH;
-        let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
-        offset += SIGNATURE_LENGTH;
-        let app_data = &announce_data[offset..];
-
         let destination = &packet.destination;
 
-        // Keeping signed data on stack is only option for now.
-        // Verification function doesn't support prehashed message.
-        let signed_data = PacketDataBuffer::new()
-            .chain_write(destination.as_slice())?
-            .chain_write(public_key.as_bytes())?
-            .chain_write(verifying_key.as_bytes())?
-            .chain_write(name_hash)?
-            .chain_write(rand_hash)?
-            .chain_write(app_data)?
-            .finalize();
+        let mut try_verify = |ratchet: Option<&[u8]>,
+                              signature: &[u8],
+                              app_data: &[u8]|
+         -> Result<(), RnsError> {
+            let mut signed_data = PacketDataBuffer::new();
+            signed_data
+                .chain_write(destination.as_slice())?
+                .chain_write(public_key.as_bytes())?
+                .chain_write(verifying_key.as_bytes())?
+                .chain_write(name_hash)?
+                .chain_write(rand_hash)?;
+            if let Some(ratchet_key) = ratchet {
+                signed_data.chain_write(ratchet_key)?;
+            }
+            signed_data.chain_write(app_data)?;
 
-        let signature = Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+            let signature = Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+            identity.verify(signed_data.finalize().as_slice(), &signature)?;
+            Ok(())
+        };
 
-        identity.verify(signed_data.as_slice(), &signature)?;
+        let remaining = &announce_data[offset..];
+        if remaining.len() >= SIGNATURE_LENGTH {
+            let signature = &remaining[..SIGNATURE_LENGTH];
+            let app_data = &remaining[SIGNATURE_LENGTH..];
+            if try_verify(None, signature, app_data).is_ok() {
+                return Ok((
+                    SingleOutputDestination::new(
+                        identity,
+                        DestinationName::new_from_hash_slice(name_hash),
+                    ),
+                    app_data,
+                    None,
+                ));
+            }
+        }
 
-        Ok((
-            SingleOutputDestination::new(identity, DestinationName::new_from_hash_slice(name_hash)),
-            app_data,
-        ))
+        if remaining.len() >= RATCHET_PUBLIC_KEY_LENGTH + SIGNATURE_LENGTH {
+            let ratchet_slice = &remaining[..RATCHET_PUBLIC_KEY_LENGTH];
+            let signature =
+                &remaining[RATCHET_PUBLIC_KEY_LENGTH..RATCHET_PUBLIC_KEY_LENGTH + SIGNATURE_LENGTH];
+            let app_data = &remaining[RATCHET_PUBLIC_KEY_LENGTH + SIGNATURE_LENGTH..];
+            if try_verify(Some(ratchet_slice), signature, app_data).is_ok() {
+                let mut ratchet = [0u8; RATCHET_PUBLIC_KEY_LENGTH];
+                ratchet.copy_from_slice(ratchet_slice);
+                return Ok((
+                    SingleOutputDestination::new(
+                        identity,
+                        DestinationName::new_from_hash_slice(name_hash),
+                    ),
+                    app_data,
+                    Some(ratchet),
+                ));
+            }
+        }
+
+        Err(RnsError::IncorrectSignature)
     }
 }
 
@@ -449,6 +487,6 @@ mod tests {
             .announce(OsRng, None)
             .expect("valid announce packet");
 
-        DestinationAnnounce::validate(&announce).expect("valid announce");
+        let _ = DestinationAnnounce::validate(&announce).expect("valid announce");
     }
 }
