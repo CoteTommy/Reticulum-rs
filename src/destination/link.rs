@@ -117,7 +117,10 @@ pub enum LinkHandleResult {
 #[derive(Clone)]
 pub enum LinkEvent {
     Activated,
-    Data(LinkPayload),
+    Data {
+        payload: LinkPayload,
+        context: PacketContext,
+    },
     Closed,
 }
 
@@ -264,7 +267,10 @@ impl Link {
                 if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
                     log::trace!("link({}): data {}B", self.id, plain_text.len());
                     self.request_time = Instant::now();
-                    self.post_event(LinkEvent::Data(LinkPayload::new_from_slice(plain_text)));
+                    self.post_event(LinkEvent::Data {
+                        payload: LinkPayload::new_from_slice(plain_text),
+                        context: packet.context,
+                    });
                 } else {
                     log::error!("link({}): can't decrypt packet", self.id);
                 }
@@ -281,7 +287,26 @@ impl Link {
                     return LinkHandleResult::None;
                 }
             }
-            _ => {}
+            PacketContext::Resource => {
+                self.request_time = Instant::now();
+                // Resource parts are already encrypted at the resource layer.
+                self.post_event(LinkEvent::Data {
+                    payload: LinkPayload::new_from_slice(packet.data.as_slice()),
+                    context: packet.context,
+                });
+            }
+            _ => {
+                let mut buffer = [0u8; PACKET_MDU];
+                if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
+                    self.request_time = Instant::now();
+                    self.post_event(LinkEvent::Data {
+                        payload: LinkPayload::new_from_slice(plain_text),
+                        context: packet.context,
+                    });
+                } else {
+                    log::error!("link({}): can't decrypt packet", self.id);
+                }
+            }
         }
 
         LinkHandleResult::None
@@ -347,6 +372,45 @@ impl Link {
             destination: self.id,
             transport: None,
             context: PacketContext::None,
+            data: packet_data,
+        })
+    }
+
+    pub fn packet_with_context(
+        &self,
+        data: &[u8],
+        packet_type: PacketType,
+        context: PacketContext,
+        already_encrypted: bool,
+    ) -> Result<Packet, RnsError> {
+        if self.status != LinkStatus::Active {
+            log::warn!("link: can't create packet for closed link");
+        }
+
+        let mut packet_data = PacketDataBuffer::new();
+
+        if already_encrypted {
+            let len = core::cmp::min(data.len(), PACKET_MDU);
+            packet_data.accuire_buf_max()[..len].copy_from_slice(&data[..len]);
+            packet_data.resize(len);
+        } else {
+            let cipher_len = {
+                let cipher_text = self.encrypt(data, packet_data.accuire_buf_max())?;
+                cipher_text.len()
+            };
+            packet_data.resize(cipher_len);
+        }
+
+        Ok(Packet {
+            header: Header {
+                destination_type: DestinationType::Link,
+                packet_type,
+                ..Default::default()
+            },
+            ifac: None,
+            destination: self.id,
+            transport: None,
+            context,
             data: packet_data,
         })
     }

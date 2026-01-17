@@ -121,7 +121,7 @@ async fn main() {
                             LinkEvent::Activated => {
                                 log::info!("Inbound link {} established", event_data.id);
                             },
-                            LinkEvent::Data(payload) => {
+                            LinkEvent::Data { payload, .. } => {
                                 if let Ok(text) = from_utf8(payload.as_slice()) {
                                     log::info!("Message over link received: {}", text);
                                 } else {
