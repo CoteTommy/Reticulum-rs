@@ -127,6 +127,10 @@ impl PathTable {
             None => return (*original_packet, None),
         };
 
+        if entry.hops <= 1 {
+            return (*original_packet, Some(entry.iface));
+        }
+
         (
             Packet {
                 header: Header {
